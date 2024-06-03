@@ -94,6 +94,7 @@
       @display-modal-add="displayModalAdd(true)"
       @display-modal-import-export="displayModalImportExport(true)"
       @collection-click="handleCollectionClick"
+      @run-in-cli="runInCLIHandler"
     />
     <div
       class="py-15 hidden flex-1 flex-col items-center justify-center bg-primaryDark px-4 text-secondaryLight"
@@ -168,6 +169,68 @@
       @hide-modal="displayModalEditProperties(false)"
       @set-collection-properties="setCollectionProperties"
     />
+
+    <HoppSmartModal
+      v-if="showRunInCLIModal"
+      dialog
+      title="Run collection via the CLI"
+      @close="
+        () => {
+          showRunInCLIModal = false
+          includeEnvironmentIDInCLICommand = false
+        }
+      "
+    >
+      <template #body>
+        <div class="space-y-4">
+          <p class="p-4 mb-4 border rounded-md text-amber-500 border-amber-600">
+            {{ cliCommandGenerationDescription }}
+          </p>
+
+          <div v-if="environmentIDToRunInCLI" class="flex gap-x-2 items-center">
+            <HoppSmartCheckbox
+              :on="includeEnvironmentIDInCLICommand"
+              @change="
+                includeEnvironmentIDInCLICommand =
+                  !includeEnvironmentIDInCLICommand
+              "
+            />
+            <span class="truncate"
+              >Include active environment:
+              <span class="text-secondaryDark">{{
+                activeEnvironment
+              }}</span></span
+            >
+          </div>
+
+          <div class="p-4 rounded-md bg-primaryLight text-secondaryDark">
+            {{ generatedCLICommand }}
+          </div>
+        </div>
+      </template>
+
+      <template #footer>
+        <div class="flex space-x-2">
+          <HoppButtonPrimary
+            :label="`${t('action.copy')}`"
+            :icon="copyIcon"
+            outline
+            @click="copyCLICommandToClipboard"
+          />
+          <HoppButtonSecondary
+            :label="`${t('action.dismiss')}`"
+            outline
+            filled
+            @click="
+              () => {
+                showRunInCLIModal = false
+                includeEnvironmentIDInCLICommand = false
+              }
+            "
+          />
+        </div>
+      </template>
+    </HoppSmartModal>
   </div>
 </template>
 
@@ -176,7 +239,7 @@ import { computed, nextTick, onMounted, PropType, ref, watch } from "vue"
 import { useToast } from "@composables/toast"
 import { useI18n } from "@composables/i18n"
 import { Picked } from "~/helpers/types/HoppPicked"
-import { useReadonlyStream } from "~/composables/stream"
+import { useReadonlyStream, useStream } from "~/composables/stream"
 import { useLocalState } from "~/newstore/localstate"
 import { pipe } from "fp-ts/function"
 import * as TE from "fp-ts/TaskEither"
@@ -253,6 +316,15 @@ import { PersistenceService } from "~/services/persistence"
 import { PersistedOAuthConfig } from "~/services/oauth/oauth.service"
 import { RESTOptionTabs } from "../http/RequestOptions.vue"
 import { EditingProperties } from "./Properties.vue"
+import { refAutoReset } from "@vueuse/core"
+import IconCopy from "~icons/lucide/copy"
+import IconCheck from "~icons/lucide/check"
+import TeamEnvironmentAdapter from "~/helpers/teams/TeamEnvironmentAdapter"
+import {
+  selectedEnvironmentIndex$,
+  setSelectedEnvironmentIndex,
+} from "~/newstore/environments"
+import { copyToClipboard } from "~/helpers/utils/clipboard"
 
 const t = useI18n()
 const toast = useToast()
@@ -338,6 +410,17 @@ const teamCollectionList = useReadonlyStream(
 const teamLoadingCollections = useReadonlyStream(
   teamCollectionAdapter.loadingCollections$,
   []
+)
+const teamEnvironmentAdapter = new TeamEnvironmentAdapter(undefined)
+const teamEnvironmentList = useReadonlyStream(
+  teamEnvironmentAdapter.teamEnvironmentList$,
+  []
+)
+
+const selectedEnvironmentIndex = useStream(
+  selectedEnvironmentIndex$,
+  { type: "NO_ENV_SELECTED" },
+  setSelectedEnvironmentIndex
 )
 
 const {
@@ -482,6 +565,8 @@ watch(
       switchToMyCollections()
     } else if (newWorkspace.type === "team") {
       updateSelectedTeam(newWorkspace)
+
+      teamEnvironmentAdapter.changeTeamID(newWorkspace.teamID)
     }
   },
   {
@@ -629,6 +714,63 @@ const showModalImportExport = ref(false)
 const showModalEditProperties = ref(false)
 const showConfirmModal = ref(false)
 const showTeamModalAdd = ref(false)
+
+const showRunInCLIModal = ref(false)
+const collectionIDToRunInCLI = ref<string | null>(null)
+const environmentIDToRunInCLI = ref<string | null | undefined>(null)
+const includeEnvironmentIDInCLICommand = ref(false)
+
+const isCloudInstance = computed(
+  () => window.location.hostname === "hoppscotch.io"
+)
+
+const cliCommandGenerationDescription = computed(() => {
+  if (isCloudInstance.value) {
+    return "Copy the below command and run it from the CLI. Please specify a personal access token."
+  }
+
+  const serverUrlCopy = import.meta.env.VITE_BACKEND_API_URL
+    ? "verify the generated SH instance server URL"
+    : "the SH instance server URL"
+
+  return `Copy the below command and run it from the CLI. Please specify a personal access token and ${serverUrlCopy}.`
+})
+
+const generatedCLICommand = computed(() => {
+  if (!collectionIDToRunInCLI.value) {
+    return ""
+  }
+
+  const environmentID = environmentIDToRunInCLI.value
+  const environmentFlag = includeEnvironmentIDInCLICommand.value
+    ? environmentID
+      ? `-e ${environmentID}`
+      : ""
+    : ""
+
+  const serverUrl =
+    // Removing `/v1` prefix
+    import.meta.env.VITE_BACKEND_API_URL.slice(0, -3) || "<server_url>"
+
+  const serverFlag = isCloudInstance.value ? ":" : `--server ${serverUrl}`
+
+  return `hopp test ${collectionIDToRunInCLI.value} ${environmentFlag} --token <access_token> ${serverFlag}`
+})
+
+const activeEnvironment = computed(() => {
+  const selectedEnv = selectedEnvironmentIndex.value
+
+  if (selectedEnv.type === "TEAM_ENV") {
+    return selectedEnv.environment.name
+  }
+
+  return null
+})
+
+const copyIcon = refAutoReset<typeof IconCopy | typeof IconCheck>(
+  IconCopy,
+  1000
+)
 
 const displayModalAdd = (show: boolean) => {
   showModalAdd.value = show
@@ -2249,6 +2391,34 @@ const setCollectionProperties = (newCollection: {
   }
 
   displayModalEditProperties(false)
+}
+
+const runInCLIHandler = (collectionID: string) => {
+  collectionIDToRunInCLI.value = collectionID
+  showRunInCLIModal.value = true
+
+  const activeWorkspace = workspace.value
+  const currentEnv = selectedEnvironmentIndex.value
+
+  if (["NO_ENV_SELECTED", "MY_ENV"].includes(currentEnv.type)) {
+    environmentIDToRunInCLI.value = null
+    return
+  }
+
+  if (activeWorkspace.type === "team" && currentEnv.type === "TEAM_ENV") {
+    environmentIDToRunInCLI.value = teamEnvironmentList.value.find(
+      (env) =>
+        env.teamID === activeWorkspace.teamID &&
+        env.environment.id === currentEnv.environment.id
+    )?.environment.id
+  }
+}
+
+const copyCLICommandToClipboard = () => {
+  copyToClipboard(generatedCLICommand.value)
+  copyIcon.value = IconCheck
+
+  toast.success(`${t("state.copied_to_clipboard")}`)
 }
 
 const resolveConfirmModal = (title: string | null) => {
